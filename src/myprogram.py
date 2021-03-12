@@ -3,29 +3,127 @@ import os
 import string
 import random
 import pickle
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
+class LangModel(nn.Module):
+    def __init__(self, n_hidden=256, n_layers=4, drop_prob=0.3, lr=0.001):
+        super().__init__()
+        
+        self.drop_prob = drop_prob
+        self.n_hidden = n_hidden
+        self.n_layers = n_layers
+        self.lr = lr
+        
+        self.emb_layer = nn.Embedding(vocab_size, 200)
+
+        ## define the LSTM
+        self.lstm = nn.LSTM(200, n_hidden, n_layers, 
+                            dropout=drop_prob, batch_first=True)
+        
+        ## define a dropout layer
+        self.dropout = nn.Dropout(drop_prob)
+        
+        ## define the fully-connected layer
+        self.fc = nn.Linear(n_hidden, vocab_size)
+    
+    def forward(self, x, hidden):
+        ''' Forward pass through the network. 
+            These inputs are x, and the hidden/cell state `hidden`. '''
+
+        ## pass input through embedding layer
+        embedded = self.emb_layer(x.long())
+        
+        ## Get the outputs and the new hidden state from the lstm
+        lstm_output, hidden = self.lstm(embedded, hidden)
+        
+        ## pass through a dropout layer
+        out = self.dropout(lstm_output)
+        
+        #out = out.contiguous().view(-1, self.n_hidden) 
+        out = out.reshape(-1, self.n_hidden) 
+
+        ## put "out" through the fully-connected layer
+        out = self.fc(out)
+
+        # return the final output and the hidden state
+        return out, hidden
+    
+    def init_hidden(self, batch_size, device):
+        ''' initializes hidden state '''
+        # Create two new tensors with sizes n_layers x batch_size x n_hidden,
+        # initialized to zero, for hidden state and cell state of LSTM
+        weight = next(self.parameters()).data
+
+        hidden = (weight.new(self.n_layers, batch_size, self.n_hidden).zero_().to(device),
+                    weight.new(self.n_layers, batch_size, self.n_hidden).zero_().to(device))
+        
+        return hidden
 
 class MyModel:
-    """
-    This is a starter model to get you started. Feel free to modify this file.
-    """
+
     n = 3
     # lang -> ngrams -> list[unigram, bigram ...], each model is a dictionary {prefix:probablity}
     lang_to_ngrams = {}
-    start_char = '¢'
-    stop_char = '£'
+
+    def create_seq(text, seq_len=5):
+        sequences = []
+        if len(text) > seq_len:
+            for i in range(seq_len, len(text)):
+                seq = list(text)[i-seq_len:i+1]
+                sequences.append("".join(seq))
+            return sequences
+        else:
+            return []
+
+    def get_integer_seq(seq):
+        return [token2int[c] for c in seq]
+
+    def getData(data):
+
+        seqs = [create_seq(i) for i in data]
+        seqs = sum(seqs, [])
+        x = []
+        y = []
+
+        for s in seqs:
+            x.append("".join(list(s)[:-1]))
+            y.append("".join(list(s)[1:]))
+        
+        int2token = {}
+        cnt = 0
+        for c in set(list("".join(data))):
+            int2token[cnt] = c
+            cnt += 1
+        token2int = {t: i for i, t in int2token.items()}
+        vocab_size = len(int2token)
+        # convert char sequences to integer sequences
+        x_int = [get_integer_seq(i) for i in x]
+        y_int = [get_integer_seq(i) for i in y]
+
+        # convert lists to numpy arrays
+        x_int = np.array(x_int)
+        y_int = np.array(y_int)
+        return x_int, y_int
+
     @classmethod
     def load_training_data(cls):
         # trainPath = r'../shortTranslations/AllTrain'
         trainPath = r'data/train'
         files = os.listdir(trainPath)
         out = {}
+        outXY = {}
         for f in files:
             lang_code = f[:f.find('train')]
             f_ = open(os.path.join(trainPath, f), "r", encoding='utf-16')
             out[lang_code] = f_.read().split("\n")
-        return out
+        for lang in out:
+            x_int, y_int = getData(out[lang])
+            outXY[lang] = tuple(x_int, y_int)
+        return out, outXY
 
     @classmethod
     def load_test_data(cls, fname):
@@ -38,68 +136,114 @@ class MyModel:
             for p in preds:
                 f.write('{}\n'.format(p))
 
-    def run_train(self, data, work_dir):
-        for lang in data:
-            self.lang_to_ngrams[lang] = []
-            for i in range(len(data[lang])):
-                data[lang][i] = (self.n - 1) * self.start_char + data[lang][i] + self.stop_char
 
-            # constuct frequency maps and total counts
-            total_counts = {}
-            for i in range(self.n):
-                self.lang_to_ngrams[lang].append({})
-                total_counts[i] = {}
-            # unigram is a special case
-            total_counts[0] = 0
-            # fill in frequency maps
-            for line in data[lang]:
-                for i in range(len(line)):
-                    for model_index in range(self.n):
-                        remove_starts = self.n - 1 - model_index
-                        index = i + remove_starts
-                        if(index + model_index >= len(line)):
-                            continue
-                        # unigram is special case of char -> freq
-                        # other n-grams are prefix -> char-> freq
-                        if model_index == 0:
-                            char = line[index]
-                            if char in self.lang_to_ngrams[lang][model_index]:
-                                self.lang_to_ngrams[lang][model_index][char] += 1
-                            else:
-                                self.lang_to_ngrams[lang][model_index][char] = 1
-                            total_counts[model_index] += 1
-                        else:
-                            prefix = line[index : index + model_index]
-                            char = line[index + model_index]
-                            if prefix in self.lang_to_ngrams[lang][model_index]:
-                                if char in self.lang_to_ngrams[lang][model_index][prefix]:
-                                    self.lang_to_ngrams[lang][model_index][prefix][char] += 1
-                                else:
-                                    self.lang_to_ngrams[lang][model_index][prefix][char] = 1
-                            else:
-                                self.lang_to_ngrams[lang][model_index][prefix] = {}
-                                self.lang_to_ngrams[lang][model_index][prefix][char] = 1
-                            if prefix in total_counts[model_index]:
-                                total_counts[model_index][prefix] += 1
-                            else:
-                                total_counts[model_index][prefix] = 1
-            # convert to probabilities
-            for model_index in range(len(self.lang_to_ngrams[lang])):
-                # unigram is a special case
-                if model_index == 0:
-                    for char in self.lang_to_ngrams[lang][model_index]:
-                        self.lang_to_ngrams[lang][model_index][char] /= total_counts[model_index]
-                else:
-                    for prefix in self.lang_to_ngrams[lang][model_index]:
-                        for char in self.lang_to_ngrams[lang][model_index][prefix]:
-                            self.lang_to_ngrams[lang][model_index][prefix][char] /= total_counts[model_index][prefix]
+
+    def get_batches(arr_x, arr_y, batch_size):
+        # iterate through the arrays
+        prv = 0
+        for n in range(batch_size, arr_x.shape[0], batch_size):
+            x = arr_x[prv:n,:]
+            y = arr_y[prv:n,:]
+            prv = n
+            yield x, y
+
+
+    def train_single(net, device, x_int, y_int, epochs=10, batch_size=32, lr=0.001, clip=1, print_every=32):
+        
+        # optimizer
+        opt = torch.optim.Adam(net.parameters(), lr=lr)
+        
+        # loss
+        criterion = nn.CrossEntropyLoss()
+        
+        # push model to GPU
+        net.to(device)
+        
+        counter = 0
+
+        net.train()
+
+        for e in tqdm(range(epochs)):
+
+            # initialize hidden state
+            h = net.init_hidden(batch_size, device)
+            
+            for x, y in get_batches(x_int, y_int, batch_size):
+                counter += 1
+                
+                # convert numpy arrays to PyTorch arrays
+                inputs, targets = torch.from_numpy(x), torch.from_numpy(y)
+                
+                # push tensors to GPU
+                inputs, targets = inputs.to(device), targets.to(device)
+
+                # detach hidden states
+                h = tuple([each.data for each in h])
+
+                # zero accumulated gradients
+                net.zero_grad()
+                
+                # get the output from the model
+                output, h = net(inputs, h)
+                
+                # calculate the loss and perform backprop
+                loss = criterion(output, targets.view(-1).long())
+
+                # back-propagate error
+                loss.backward()
+
+                # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
+                nn.utils.clip_grad_norm_(net.parameters(), clip)
+
+                # update weigths
+                opt.step()
+
+    def run_train(self, data, work_dir):
+        
+
+
+    # predict next token
+    def predict(net, tkn, device, h=None):
+            
+        # tensor inputs
+        x = np.array([[token2int[tkn]]])
+        inputs = torch.from_numpy(x)
+
+        # push to GPU
+        inputs = inputs.to(device)
+
+        # detach hidden state from history
+        h = tuple([each.data for each in h])
+
+        # get the output of the model
+        out, h = net(inputs, h)
+
+        # get the token probabilities
+        p = F.softmax(out, dim=1).data
+
+        p = p.cpu()
+        
+
+        p = p.numpy()
+        p = p.reshape(p.shape[1],)
+
+        # get indices of top 3 values
+        top_n_idx = p.argsort()[-3:][::-1]
+        # return the encoded value of the predicted char and the hidden state
+        return [int2token[i] for i in top_n_idx], [p[i] for i in top_n_idx], h
+
+    # function to generate text
+    def sample(net, size, device, prime='it is'):
+        net.to(device)
+        net.eval()
+        h = net.init_hidden(1, device)
+        # predict next token
+        for t in prime:
+            token, probs, h = predict(net, t, device, h)
+        return token, probs
 
     def run_pred(self, data):
         # your code here
-        preds = []
-        l1 = 0.3
-        l2 = 0.3
-        l3 = 0.4
         for inp in data:
 
             # create a list of languages that it could be, creating a score for each language
@@ -121,7 +265,9 @@ class MyModel:
                 langScores[lang] = norm
             
             inp = "¢¢" + inp  # start padding
-            prefix = inp[-2:]  # last 2 chars in input
+            # prefix = inp[-2:]  # last 2 chars in input
+            prefix = inp[-(self.n-1):]  # last n-1 chars in input
+
             # dict of lang code -> list of dictionaries
             # unigram char to prob
             # bigram, trigram -> dict is prefix in tuple to any suffix probability
@@ -146,8 +292,8 @@ class MyModel:
                         bigram_probability += bigram_model[prefix[1]][token]
 
                     trigram_probability = 0.0
-                    if (prefix[0], prefix[1]) in trigram_model and token in trigram_model[prefix[0], prefix[1]]:
-                        trigram_probability += trigram_model[prefix[0], prefix[1]]
+                    if (prefix[0] + prefix[1]) in trigram_model and token in trigram_model[(prefix[0] + prefix[1])]:
+                        trigram_probability += trigram_model[(prefix[0] + prefix[1])][token]
 
                     interpolated_probability = l1 * unigram_probability + l2 * bigram_probability + l3 * trigram_probability
                     interpolated_probability *= langScores[lang]
