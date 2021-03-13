@@ -160,7 +160,6 @@ class MyModel:
 
     @classmethod
     def train_single(cls, net, device, x_int, y_int, epochs=10, batch_size=32, lr=0.001, clip=1):
-        
         # optimizer
         opt = torch.optim.Adam(net.parameters(), lr=lr)
         # loss
@@ -265,14 +264,19 @@ class MyModel:
 
     # function to generate text
     @classmethod
-    def sample(cls, net, device, int2token, token2int, prime):
+    def sample(cls, net, device, int2token, token2int, unigram, prime):
         net.to(device)
         net.eval()
         h = net.init_hidden(1, device)
         # predict next token
+        token = []
+        probs = []
         for t in prime:
-            print(t)
-            token, probs, h = MyModel.predict(net, t, device, int2token, token2int, h)
+            if t not in unigram:
+                tokens = sorted(unigram, key=unigram.get, reverse=True)[:3]
+                probs = [0.03, 0.02, 0.01]
+            else:
+                token, probs, h = MyModel.predict(net, t, device, int2token, token2int, h)
         return token, probs
 
     def run_pred(self, data, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
@@ -305,14 +309,16 @@ class MyModel:
 
             for lang in self.model:
                 langProbabilities[lang] = math.exp(langScores[lang]) / z
+            
             charGuesses = dict()
             # wont work if there is not tokens so we need to make sure 
             for lang in langScores:
-                if langScores[lang] > 0:
+                unigram = self.model[lang][0]
+                if langProbabilities[lang] > 0.2:
                     net = self.model[lang][1]
                     int2token = self.model[lang][2]
                     token2int = self.model[lang][3]
-                    letters, scores = MyModel.sample(net, device, int2token, token2int, inp)
+                    letters, scores = MyModel.sample(net, device, int2token, token2int, unigram, inp)
                     for i in range(len(letters)):
                         curLetter = letters[i]
                         oldScore = charGuesses.get(curLetter, 0)
